@@ -143,6 +143,9 @@ jobs:
           grep -F "version ${LEAN_VER#v}" <<<"$out"
           # Should be a no-op: Verbose and Mathlib are already built in the image.
           docker run --rm "${IMAGE}:${TAG}" lake build
+          # Compile a real file against the prebuilt Verbose English module.
+          docker run --rm "${IMAGE}:${TAG}" bash -c \
+            "printf 'import Verbose.English.All\n#check Nat\n' > /tmp/Smoke.lean && lake env lean /tmp/Smoke.lean"
 
       - name: Summary
         run: |

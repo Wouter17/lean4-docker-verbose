@@ -30,7 +30,7 @@ lake env lean Teaching/MyFile.lean   # check one file
 lake build                           # build everything imported by Teaching.lean
 ```
 
-Add your own modules to `Teaching.lean`, and write `import Verbose` at the top of your files. For the tactic syntax, see the Verbose repo's `getting-started.md` and `Verbose/English/Examples.lean`.
+Your files should start with `import Verbose.English.All`, which is prebuilt in the image. If you need another Verbose module, add an `import` for it to `Teaching.lean` so it is built when the image is built; otherwise run `lake build <Module.Name>` inside the container once. For the tactic syntax, see the Verbose repo's `getting-started.md` and `Verbose/English/Examples.lean`.
 
 ## Manual runs
 
