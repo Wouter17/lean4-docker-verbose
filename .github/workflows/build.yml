@@ -1,0 +1,161 @@
+name: Build Lean 4 + Verbose image
+
+on:
+  schedule:
+    - cron: "43 4 * * *"   # daily at 04:43 UTC
+  workflow_dispatch:
+    inputs:
+      verbose_rev:
+        description: "Verbose branch/tag/commit to build. Empty = master."
+        required: false
+        default: ""
+      force:
+        description: "Rebuild even if the tag already exists"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - project/**
+      - .github/workflows/build.yml
+
+concurrency:
+  group: build-verbose-image
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve Verbose revision, Lean toolchain and tags
+        id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_REV: ${{ inputs.verbose_rev }}
+          FORCE: ${{ github.event_name == 'push' || inputs.force == true }}
+        run: |
+          set -euo pipefail
+
+          # Verbose pins a Mathlib release, which dictates the Lean version.
+          # So the Lean version here comes from Verbose's lean-toolchain file,
+          # not from "latest Lean".
+          if [ -n "${INPUT_REV}" ]; then
+            ref="${INPUT_REV}"; auto=false
+          else
+            ref="master"; auto=true
+          fi
+
+          sha="$(gh api "repos/PatrickMassot/verbose-lean4/commits/${ref}" --jq .sha)"
+          short="${sha:0:7}"
+          raw="https://raw.githubusercontent.com/PatrickMassot/verbose-lean4/${sha}"
+
+          toolchain="$(curl -fsSL "${raw}/lean-toolchain" | tr -d '[:space:]')"
+          if ! [[ "$toolchain" =~ ^leanprover/lean4:(v[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?)$ ]]; then
+            echo "Unexpected lean-toolchain: '$toolchain'" >&2
+            exit 1
+          fi
+          lean_ver="${BASH_REMATCH[1]}"
+
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          image="ghcr.io/${owner}/lean4-verbose"
+          tag="verbose-${short}"
+
+          build=true
+          if [ "$FORCE" != "true" ] && docker buildx imagetools inspect "${image}:${tag}" >/dev/null 2>&1; then
+            build=false
+          fi
+
+          # Always: immutable tag for this Verbose commit.
+          # Only when following master: also move lean-vX.Y.Z and latest.
+          tags="${image}:${tag}"
+          if [ "$auto" = "true" ]; then
+            tags="${tags}"$'\n'"${image}:lean-${lean_ver}"$'\n'"${image}:latest"
+          fi
+
+          {
+            echo "sha=${sha}"
+            echo "short=${short}"
+            echo "toolchain=${toolchain}"
+            echo "lean_ver=${lean_ver}"
+            echo "image=${image}"
+            echo "tag=${tag}"
+            echo "build=${build}"
+            echo "tags<<EOF"
+            echo "${tags}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Verbose ${short} -> ${toolchain} (build=${build})"
+
+      # Mathlib's prebuilt oleans are several GB; the default runner disk is tight.
+      - name: Free disk space
+        if: steps.v.outputs.build == 'true'
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          df -h /
+
+      # Uses the runner's default Docker builder (no QEMU/buildx container) so the
+      # image lands in the local Docker store and can be smoke-tested without
+      # pulling it back down.
+      - name: Build and push
+        if: steps.v.outputs.build == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          build-args: |
+            LEAN_TOOLCHAIN=${{ steps.v.outputs.toolchain }}
+            VERBOSE_REV=${{ steps.v.outputs.sha }}
+          tags: ${{ steps.v.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.title=lean4-verbose
+            org.opencontainers.image.version=${{ steps.v.outputs.tag }}
+            dev.lean.verbose.revision=${{ steps.v.outputs.sha }}
+            dev.lean.version=${{ steps.v.outputs.lean_ver }}
+
+      - name: Smoke test
+        if: steps.v.outputs.build == 'true'
+        env:
+          IMAGE: ${{ steps.v.outputs.image }}
+          TAG: ${{ steps.v.outputs.tag }}
+          LEAN_VER: ${{ steps.v.outputs.lean_ver }}
+        run: |
+          out="$(docker run --rm "${IMAGE}:${TAG}" lean --version)"
+          echo "$out"
+          grep -F "version ${LEAN_VER#v}" <<<"$out"
+          # Should be a no-op: Verbose and Mathlib are already built in the image.
+          docker run --rm "${IMAGE}:${TAG}" lake build
+
+      - name: Summary
+        run: |
+          {
+            echo "### Lean 4 + Verbose image"
+            echo "- Verbose commit: \`${{ steps.v.outputs.short }}\`"
+            echo "- Lean toolchain: \`${{ steps.v.outputs.toolchain }}\`"
+            if [ "${{ steps.v.outputs.build }}" = "true" ]; then
+              echo "- Built and pushed:"
+              echo '```'
+              echo "${{ steps.v.outputs.tags }}"
+              echo '```'
+            else
+              echo "- Already published, nothing to do."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

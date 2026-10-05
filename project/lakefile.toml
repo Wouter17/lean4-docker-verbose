@@ -1,0 +1,12 @@
+name = "teaching"
+defaultTargets = ["Teaching"]
+
+# Verbose pulls in Mathlib itself (pinned to a matching release),
+# so do NOT add a separate mathlib requirement here.
+[[require]]
+name = "verbose"
+git = "https://github.com/PatrickMassot/verbose-lean4.git"
+rev = "@VERBOSE_REV@"   # replaced at image build time
+
+[[lean_lib]]
+name = "Teaching"
